@@ -3,6 +3,7 @@ const { OAuth2Client } = require("google-auth-library");
 const jwt = require("jsonwebtoken");
 const User = require("../module/Users");
 const axios = require("axios");
+const { sendPushNotification, buildImageUrl, getBaseUrl } = require("../utils/push");
 
 const router = express.Router();
 
@@ -212,6 +213,58 @@ router.get("/auth/me", auth, async (req, res) => {
   res.json({ success: true, user: toUserResponse(user) });
 });
 
+/* ================== ONLINE (إشعار الأصدقاء عند فتح التطبيق) ================== */
+router.post("/auth/online", auth, async (req, res) => {
+  try {
+    const meId = req.user.id;
+    const me = await User.findOne({ userId: meId }).select("name profileImage friends");
+    if (!me || !me.friends || me.friends.length === 0) {
+      return res.json({ success: true });
+    }
+    const friendIds = me.friends.map((f) => f.userId).filter(Boolean);
+    if (friendIds.length === 0) return res.json({ success: true });
+
+    const friendsWithTokens = await User.find({
+      userId: { $in: friendIds },
+      pushToken: { $exists: true, $ne: "" },
+    }).select("userId pushToken");
+
+    const baseUrl = getBaseUrl(req);
+    const myName = me.name || "صديقك";
+    const myImage = buildImageUrl(me.profileImage, baseUrl);
+    const title = myName;
+    const body = "متصل - تعال لدردشة";
+
+    const promises = friendsWithTokens.map((f) =>
+      sendPushNotification(f.pushToken, title, body, myImage)
+    );
+    await Promise.allSettled(promises);
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("online notify error:", err);
+    res.json({ success: true });
+  }
+});
+
+/* ================== PUSH TOKEN (للإشعارات) ================== */
+router.post("/auth/push-token", auth, async (req, res) => {
+  try {
+    const { pushToken } = req.body;
+    if (!pushToken || typeof pushToken !== "string") {
+      return res.status(400).json({ success: false, message: "رمز الإشعار مطلوب" });
+    }
+    const user = await User.findOne({ userId: req.user.id });
+    if (!user) return res.status(404).json({ success: false, message: "المستخدم غير موجود" });
+    user.pushToken = pushToken.trim();
+    await user.save();
+    res.json({ success: true });
+  } catch (error) {
+    console.error("push-token error:", error);
+    res.status(500).json({ success: false, message: "خطأ في حفظ رمز الإشعار" });
+  }
+});
+
 /* ================== UPDATE PROFILE ================== */
 // الحقول التي تُخزَن مرة واحدة ولا تُغيّر لاحقاً: age, dateOfBirth, height, weight, country, gender, hobby, month
 // يُسمح بتعديل الاسم والصورة فقط بعد الاكتمال
@@ -246,6 +299,41 @@ router.put("/auth/profile", auth, async (req, res) => {
   } catch (error) {
     console.error("profile update error:", error);
     res.status(500).json({ message: "خطأ في تحديث الملف الشخصي" });
+  }
+});
+
+/* ================== DELETE ACCOUNT (مسح الحساب) ================== */
+router.delete("/auth/account", auth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const User = require("../module/Users");
+    const Message = require("../module/Messages");
+    const Moment = require("../module/Moment");
+    const Wallet = require("../module/Wallet");
+
+    await Promise.all([
+      User.deleteOne({ userId }),
+      Message.deleteMany({ $or: [{ fromId: userId }, { toId: userId }] }),
+      Moment.deleteMany({ userId }),
+      Wallet.deleteOne({ userId }),
+    ]);
+
+    await User.updateMany(
+      {},
+      {
+        $pull: {
+          followers: { userId },
+          friends: { userId },
+          blocked: { userId },
+          profileVisitors: { userId },
+        },
+      }
+    );
+
+    res.json({ success: true, message: "تم مسح الحساب بنجاح" });
+  } catch (error) {
+    console.error("delete-account error:", error);
+    res.status(500).json({ success: false, message: "تعذر مسح الحساب" });
   }
 });
 

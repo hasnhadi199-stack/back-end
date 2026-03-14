@@ -41,6 +41,27 @@ const UserSchema = new mongoose.Schema({
     country: String,
     gender: String,
   }],
+  profileVisitors: [{
+    userId: String,
+    name: String,
+    profileImage: String,
+    age: Number,
+    country: String,
+    gender: String,
+    visitedAt: { type: Date, default: Date.now },
+  }],
+  /** من أعجبوا ببروفايلي — يُضاف عند POST /api/profile/like */
+  profileLikedBy: [{
+    userId: String,
+    name: String,
+    profileImage: String,
+    age: Number,
+    country: String,
+    gender: String,
+    location: String,
+    likedAt: { type: Date, default: Date.now },
+  }],
+  pushToken: { type: String, default: "" },
 });
 
 module.exports = mongoose.model("User", UserSchema);

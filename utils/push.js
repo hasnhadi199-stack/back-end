@@ -1,0 +1,60 @@
+const axios = require("axios");
+
+async function sendPushNotification(pushToken, title, body, imageUrl) {
+  if (!pushToken || !pushToken.startsWith("ExponentPushToken")) return;
+  try {
+    const img = imageUrl && String(imageUrl).trim();
+    const finalImg = img && img.startsWith("http") ? img : null;
+    const payload = {
+      to: pushToken,
+      title: title || "رسالة جديدة",
+      body: body || "لديك رسالة جديدة",
+      sound: "default",
+      priority: "high",
+      channelId: "messages",
+    };
+    if (finalImg) {
+      payload.richContent = { image: finalImg };
+    }
+    await axios.post(
+      "https://exp.host/--/api/v2/push/send",
+      [payload],
+      { headers: { "Content-Type": "application/json" }, timeout: 10000 }
+    );
+  } catch (err) {
+    // تجاهل
+  }
+}
+
+function buildImageUrl(profileImage, baseUrl) {
+  if (!profileImage || !String(profileImage).trim()) return null;
+  const img = String(profileImage).trim();
+  if (img.startsWith("http") || img.startsWith("data:")) return img;
+  if (!baseUrl) return null;
+  const base = String(baseUrl).replace(/\/$/, "");
+  if (img.startsWith("/uploads/")) return `${base}${img}`;
+  if (img.startsWith("uploads/")) return `${base}/${img}`;
+  return `${base}/uploads/${img.replace(/^\//, "")}`;
+}
+
+function getBaseUrl(req) {
+  const proto = req.get("x-forwarded-proto") || req.protocol || "http";
+  const host = req.get("x-forwarded-host") || req.get("host");
+  return `${proto}://${host}`;
+}
+
+/**
+ * رابط أساسي يمكن للجهاز الوصول إليه (للإشعارات عند إغلاق التطبيق).
+ * يستخدم BASE_URL من .env إذا كان الطلب من localhost.
+ */
+function getPublicBaseUrl(req) {
+  const fromReq = getBaseUrl(req);
+  const host = req.get("x-forwarded-host") || req.get("host") || "";
+  const isLocal = /localhost|127\.0\.0\.1/i.test(host);
+  if (isLocal && process.env.BASE_URL) {
+    return String(process.env.BASE_URL).replace(/\/$/, "");
+  }
+  return fromReq.replace(/\/$/, "");
+}
+
+module.exports = { sendPushNotification, buildImageUrl, getBaseUrl, getPublicBaseUrl };

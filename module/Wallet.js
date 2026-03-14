@@ -11,7 +11,12 @@ const WalletSchema = new mongoose.Schema({
   totalGold: { type: Number, default: 0 },
   chargedGold: { type: Number, default: 0 },
   freeGold: { type: Number, default: 0 },
+  diamonds: { type: Number, default: 0 }, // أرباح من الهدايا المستلمة (45% من القيمة)
   transactions: [TransactionSchema],
+  lastFiveMessagesClaim: { type: Date, default: null }, // آخر استلام لمكافأة 5 رسائل
+  lastShareMomentClaim: { type: Date, default: null }, // آخر استلام لمكافأة نشر لحظة
+  lastAddFriendClaim: { type: Date, default: null }, // آخر استلام لمكافأة إضافة صديق
+  lastDiceClaim: { type: Date, default: null }, // آخر استلام لمكافأة 5 نرد
 });
 
 module.exports = mongoose.model("Wallet", WalletSchema);
