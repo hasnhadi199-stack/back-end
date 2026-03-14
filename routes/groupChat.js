@@ -7,18 +7,35 @@ const Wallet = require("../module/Wallet");
 const router = express.Router();
 
 // غرفة الدردشة الجماعية — تخزين مؤقت في الذاكرة
-// كل مستخدم: { userId, name, gender, profileImage, joinedAt }
+// كل مستخدم: { userId, name, gender, profileImage, joinedAt, lastSeen }
 const roomUsers = new Map();
 // الشقق (1-8): slotIndex -> { userId, name, profileImage }
 const roomSlots = new Map();
 
-function cleanupStale() {
-  const now = Date.now();
-  const STALE_MS = 60 * 1000;
-  for (const [userId, data] of roomUsers.entries()) {
-    if (now - data.joinedAt > STALE_MS) roomUsers.delete(userId);
+const STALE_MS = 8 * 1000; // 8 ثوانٍ بدون نبض = اعتبار المستخدم مغلقاً (إغلاق التطبيق أو التنقل الطويل)
+
+function touchUser(userId) {
+  const u = roomUsers.get(userId);
+  if (u) {
+    u.lastSeen = Date.now();
   }
 }
+
+function cleanupStale() {
+  const now = Date.now();
+  for (const [userId, data] of roomUsers.entries()) {
+    const lastSeen = data.lastSeen ?? data.joinedAt ?? 0;
+    if (now - lastSeen > STALE_MS) {
+      roomUsers.delete(userId);
+      for (const [idx, slot] of roomSlots.entries()) {
+        if (slot.userId === userId) roomSlots.delete(idx);
+      }
+    }
+  }
+}
+
+// تنظيف دوري كل 3 ثوانٍ — لإزالة من أُغلق تطبيقهم
+setInterval(cleanupStale, 3000);
 
 /** دخول غرفة الدردشة الجماعية */
 router.post("/group-chat/join", auth, async (req, res) => {
@@ -27,12 +44,14 @@ router.post("/group-chat/join", auth, async (req, res) => {
     const me = await User.findOne({ userId: meId }).select("name gender profileImage");
     if (!me) return res.status(404).json({ success: false, message: "المستخدم غير موجود" });
 
+    const now = Date.now();
     roomUsers.set(meId, {
       userId: meId,
       name: me.name || "مستخدم",
       gender: me.gender || "male",
       profileImage: me.profileImage || null,
-      joinedAt: Date.now(),
+      joinedAt: now,
+      lastSeen: now,
     });
     cleanupStale();
     res.json({ success: true });
@@ -60,6 +79,7 @@ router.post("/group-chat/leave", auth, async (req, res) => {
 router.post("/group-chat/slot", auth, async (req, res) => {
   try {
     const meId = req.user.id;
+    touchUser(meId);
     const { slotIndex, action } = req.body;
     if (action === "release") {
       for (const [idx, data] of roomSlots.entries()) {
@@ -100,6 +120,8 @@ function getSlotsArray() {
 /** جلب الشقق الحالية */
 router.get("/group-chat/slots", auth, async (req, res) => {
   try {
+    touchUser(req.user.id);
+    cleanupStale();
     res.json({ success: true, slots: getSlotsArray() });
   } catch (err) {
     res.status(500).json({ success: false });
@@ -109,6 +131,7 @@ router.get("/group-chat/slots", auth, async (req, res) => {
 /** قائمة المستخدمين الحاليين في الغرفة */
 router.get("/group-chat/users", auth, async (req, res) => {
   try {
+    touchUser(req.user.id);
     cleanupStale();
     const list = Array.from(roomUsers.values()).map((u) => ({
       userId: u.userId,
@@ -126,8 +149,10 @@ router.get("/group-chat/users", auth, async (req, res) => {
 /** إرسال رسالة في الدردشة الجماعية */
 router.post("/group-chat/send", auth, async (req, res) => {
   try {
-    const { text, audioUrl, audioDurationSeconds, imageUrl, toId, giftAmount } = req.body;
     const fromId = req.user.id;
+    touchUser(fromId);
+    cleanupStale();
+    const { text, audioUrl, audioDurationSeconds, imageUrl, toId, giftAmount } = req.body;
     const isVoice = !!audioUrl;
     const isImage = !!imageUrl;
     const textVal = isVoice ? "🎤 رسالة صوتية" : isImage ? "📷 صورة" : (text || "").trim();
