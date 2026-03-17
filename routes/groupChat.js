@@ -2,119 +2,168 @@ const express = require("express");
 const path = require("path");
 const fs = require("fs");
 const multer = require("multer");
-const { auth } = require("../authGoogle/googleAuth");
-const User = require("../module/Users");
-const GroupChatMessage = require("../module/GroupChatMessage");
-const Wallet = require("../module/Wallet");
-
-// تخزين مؤقت للرسائل — يقلل الضغط على MongoDB عند الاستعلام المتكرر
-const messagesCache = { data: null, ts: 0 };
-const MESSAGES_CACHE_MS = 3000;
-const { getBaseUrl } = require("../utils/push");
+const jwt = require("jsonwebtoken");
 const { AccessToken } = require("livekit-server-sdk");
+const GroupChatMessage = require("../module/GroupChatMessage");
+const User = require("../module/Users");
+const Wallet = require("../module/Wallet");
+const { auth } = require("../authGoogle/googleAuth");
+const { getBaseUrl } = require("../utils/push");
 
 const router = express.Router();
+
+const ROOM_NAME = "group-chat-room";
+
+// in-memory store for slots and room membership (replace with Redis in production)
+const slots = new Map(); // slotIndex -> { userId, name, profileImage, ... }
+const roomMembers = new Set(); // userId
 
 const musicDir = path.join(__dirname, "../uploads/music");
 if (!fs.existsSync(musicDir)) fs.mkdirSync(musicDir, { recursive: true });
 const musicUpload = multer({
   storage: multer.diskStorage({
     destination: (_, __, cb) => cb(null, musicDir),
-    filename: (_, file, cb) => {
-      const ext = (path.extname(file.originalname || "") || ".mp3").toLowerCase();
-      cb(null, `music_${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`);
-    },
+    filename: (_, __, cb) => cb(null, `song_${Date.now()}_${Math.random().toString(36).slice(2)}.mp3`),
   }),
-  limits: { fileSize: 50 * 1024 * 1024 },
+  limits: { fileSize: 15 * 1024 * 1024 },
   fileFilter: (_, file, cb) => {
     const ok =
       ["audio/mpeg", "audio/mp3", "audio/m4a", "audio/x-m4a", "audio/aac"].includes(file.mimetype) ||
-      [".mp3", ".m4a", ".aac"].some((e) => (file.originalname || "").toLowerCase().endsWith(e));
+      (file.originalname || "").toLowerCase().match(/\.(mp3|m4a|aac)$/);
     cb(null, !!ok);
   },
 });
 
-const LIVEKIT_ROOM = "rolet-group-chat";
-
-// غرفة الدردشة الجماعية — تخزين مؤقت في الذاكرة
-// كل مستخدم: { userId, name, gender, profileImage, joinedAt, lastSeen }
-const roomUsers = new Map();
-// الشقق (1-8): slotIndex -> { userId, name, profileImage }
-const roomSlots = new Map();
-
-const STALE_MS = 8 * 1000; // 8 ثوانٍ بدون نبض = اعتبار المستخدم مغلقاً (إغلاق التطبيق أو التنقل الطويل)
-
-function touchUser(userId) {
-  const u = roomUsers.get(userId);
-  if (u) {
-    u.lastSeen = Date.now();
-  }
-}
-
-function cleanupStale() {
-  const now = Date.now();
-  for (const [userId, data] of roomUsers.entries()) {
-    const lastSeen = data.lastSeen ?? data.joinedAt ?? 0;
-    if (now - lastSeen > STALE_MS) {
-      roomUsers.delete(userId);
-      for (const [idx, slot] of roomSlots.entries()) {
-        if (slot.userId === userId) roomSlots.delete(idx);
-      }
-    }
-  }
-}
-
-// تنظيف دوري كل 3 ثوانٍ — لإزالة من أُغلق تطبيقهم
-setInterval(cleanupStale, 3000);
-
-/** دخول غرفة الدردشة الجماعية */
+// POST /api/group-chat/join
 router.post("/group-chat/join", auth, async (req, res) => {
   try {
-    const meId = req.user.id;
-    const me = await User.findOne({ userId: meId }).select("name gender profileImage");
-    if (!me) return res.status(404).json({ success: false, message: "المستخدم غير موجود" });
-
-    const now = Date.now();
-    roomUsers.set(meId, {
-      userId: meId,
-      name: me.name || "مستخدم",
-      gender: me.gender || "male",
-      profileImage: me.profileImage || null,
-      joinedAt: now,
-      lastSeen: now,
-    });
-    cleanupStale();
+    roomMembers.add(req.user.id);
     res.json({ success: true });
   } catch (err) {
     console.error("group-chat join error:", err);
-    res.status(500).json({ success: false });
+    res.status(500).json({ success: false, message: "خطأ في الانضمام" });
   }
 });
 
-/** توكن LiveKit للصوت المباشر — LiveKit أرخص/مجاني عند الاستضافة الذاتية */
+// POST /api/group-chat/leave
+router.post("/group-chat/leave", auth, async (req, res) => {
+  try {
+    roomMembers.delete(req.user.id);
+    for (const [idx, data] of slots.entries()) {
+      if (data && data.userId === req.user.id) {
+        slots.delete(idx);
+        break;
+      }
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error("group-chat leave error:", err);
+    res.status(500).json({ success: false, message: "خطأ في المغادرة" });
+  }
+});
+
+// POST /api/group-chat/slot — take or release slot
+router.post("/group-chat/slot", auth, async (req, res) => {
+  try {
+    const { slotIndex, action } = req.body;
+    const meId = req.user.id;
+
+    if (action === "release") {
+      for (const [idx, data] of slots.entries()) {
+        if (data && data.userId === meId) {
+          slots.delete(idx);
+          break;
+        }
+      }
+    } else if (action === "take" && typeof slotIndex === "number" && slotIndex >= 0 && slotIndex < 8) {
+      for (const [idx] of slots.entries()) {
+        if (slots.get(idx)?.userId === meId) slots.delete(idx);
+      }
+      const me = await User.findOne({ userId: meId }).select("userId name profileImage").lean();
+      const wallet = await Wallet.findOne({ userId: meId }).select("totalGold chargedGold diamonds").lean();
+      slots.set(slotIndex, {
+        userId: meId,
+        name: me?.name || "مستخدم",
+        profileImage: me?.profileImage || null,
+        totalGold: wallet?.totalGold ?? 0,
+        chargedGold: wallet?.chargedGold ?? 0,
+        diamonds: wallet?.diamonds ?? 0,
+      });
+    }
+
+    const result = [];
+    for (let i = 0; i < 8; i++) {
+      const d = slots.get(i);
+      result.push(d ? { slotIndex: i, ...d } : null);
+    }
+    res.json({ success: true, slots: result });
+  } catch (err) {
+    console.error("group-chat slot error:", err);
+    res.status(500).json({ success: false, message: "خطأ في الشقة" });
+  }
+});
+
+// GET /api/group-chat/slots
+router.get("/group-chat/slots", auth, async (req, res) => {
+  try {
+    const result = [];
+    for (let i = 0; i < 8; i++) {
+      const d = slots.get(i);
+      result.push(d ? { slotIndex: i, ...d } : null);
+    }
+    res.json({ success: true, slots: result });
+  } catch (err) {
+    console.error("group-chat slots error:", err);
+    res.status(500).json({ success: false, message: "خطأ في جلب الشقق" });
+  }
+});
+
+// GET /api/group-chat/users
+router.get("/group-chat/users", auth, async (req, res) => {
+  try {
+    const userIds = Array.from(roomMembers);
+    const users = await User.find({ userId: { $in: userIds } })
+      .select("userId name profileImage gender")
+      .lean();
+    const list = users.map((u) => ({
+      userId: u.userId,
+      name: u.name || "مستخدم",
+      profileImage: u.profileImage || null,
+      gender: u.gender || null,
+    }));
+    res.json({ success: true, users: list });
+  } catch (err) {
+    console.error("group-chat users error:", err);
+    res.status(500).json({ success: false, message: "خطأ في جلب المستخدمين" });
+  }
+});
+
+// GET /api/group-chat/voice-token
 router.get("/group-chat/voice-token", auth, async (req, res) => {
   try {
     const apiKey = process.env.LIVEKIT_API_KEY;
     const apiSecret = process.env.LIVEKIT_API_SECRET;
-    const wsUrl = process.env.LIVEKIT_WS_URL;
-    if (!apiKey || !apiSecret || !wsUrl) {
+    const wsUrl = process.env.LIVEKIT_WS_URL || "wss://your-livekit-server.livekit.cloud";
+
+    if (!apiKey || !apiSecret) {
       return res.status(503).json({ success: false, message: "LiveKit غير مُعد" });
     }
-    const meId = req.user.id;
-    const me = await User.findOne({ userId: meId }).select("name");
-    const identity = meId;
-    const name = me?.name || "مستخدم";
-    const at = new AccessToken(apiKey, apiSecret, { identity, name, ttl: "2h" });
-    at.addGrant({ roomJoin: true, room: LIVEKIT_ROOM, canPublish: true, canSubscribe: true });
+
+    const at = new AccessToken(apiKey, apiSecret, {
+      identity: req.user.id,
+      name: req.user.id,
+    });
+    at.addGrant({ roomJoin: true, room: ROOM_NAME, canPublish: true, canSubscribe: true });
+
     const token = await at.toJwt();
     res.json({ success: true, token, wsUrl });
   } catch (err) {
-    console.error("voice-token error:", err);
-    res.status(500).json({ success: false });
+    console.error("group-chat voice-token error:", err);
+    res.status(500).json({ success: false, message: "خطأ في الحصول على توكن الصوت" });
   }
 });
 
-/** رفع أغنية للبث في الدردشة الجماعية */
+// POST /api/group-chat/upload-music
 router.post("/group-chat/upload-music", auth, musicUpload.single("music"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, message: "الملف مطلوب" });
@@ -122,153 +171,141 @@ router.post("/group-chat/upload-music", auth, musicUpload.single("music"), async
     const musicUrl = `${base}/uploads/music/${req.file.filename}`;
     res.json({ success: true, musicUrl });
   } catch (err) {
-    console.error("upload-music error:", err);
+    console.error("group-chat upload-music error:", err);
     res.status(500).json({ success: false, message: "خطأ في رفع الأغنية" });
   }
 });
 
-/** مغادرة غرفة الدردشة */
-router.post("/group-chat/leave", auth, async (req, res) => {
-  try {
-    const meId = req.user.id;
-    for (const [idx, data] of roomSlots.entries()) {
-      if (data.userId === meId) roomSlots.delete(idx);
-    }
-    roomUsers.delete(meId);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ success: false });
-  }
-});
-
-/** أخذ شقة أو ترك المايك — كل مستخدم بشكل منفرد */
-router.post("/group-chat/slot", auth, async (req, res) => {
-  try {
-    const meId = req.user.id;
-    touchUser(meId);
-    const { slotIndex, action } = req.body;
-    if (action === "release") {
-      for (const [idx, data] of roomSlots.entries()) {
-        if (data.userId === meId) roomSlots.delete(idx);
-      }
-      return res.json({ success: true, slots: await getSlotsWithWallet() });
-    }
-    const idx = parseInt(slotIndex, 10);
-    if (!Number.isFinite(idx) || idx < 1 || idx > 8) {
-      return res.status(400).json({ success: false, message: "رقم الشقة غير صالح" });
-    }
-    for (const [i, data] of roomSlots.entries()) {
-      if (data.userId === meId) roomSlots.delete(i);
-    }
-    const me = await User.findOne({ userId: meId }).select("name profileImage");
-    if (!me) return res.status(404).json({ success: false, message: "المستخدم غير موجود" });
-    roomSlots.set(idx, {
-      userId: meId,
-      name: me.name || "مستخدم",
-      profileImage: me.profileImage || null,
-    });
-    res.json({ success: true, slots: await getSlotsWithWallet() });
-  } catch (err) {
-    console.error("group-chat slot error:", err);
-    res.status(500).json({ success: false });
-  }
-});
-
-function getSlotsArray() {
-  const arr = [];
-  for (let i = 1; i <= 8; i++) {
-    const data = roomSlots.get(i);
-    arr.push(data ? { slotIndex: i, userId: data.userId, name: data.name, profileImage: data.profileImage } : null);
-  }
-  return arr;
-}
-
-async function getSlotsWithWallet() {
-  const slots = getSlotsArray();
-  const userIds = slots.filter(Boolean).map((s) => s.userId);
-  const wallets = userIds.length
-    ? await Wallet.find({ userId: { $in: userIds } }).select("userId totalGold chargedGold freeGold diamonds").lean()
-    : [];
-  const walletMap = Object.fromEntries(wallets.map((w) => [w.userId, w]));
-  return slots.map((s) => {
-    if (!s) return null;
-    const w = walletMap[s.userId] || {};
-    const totalGold = (w.chargedGold ?? 0) + (w.freeGold ?? 0);
-    const diamonds = w.diamonds ?? 0;
-    const chargedGold = w.chargedGold ?? 0;
-    const level = Math.floor(diamonds / 10) + 1;
-    return { ...s, totalGold, diamonds, chargedGold, level };
-  });
-}
-
-/** جلب الشقق الحالية — مع ثروة وسحر وليفل */
-router.get("/group-chat/slots", auth, async (req, res) => {
-  try {
-    touchUser(req.user.id);
-    cleanupStale();
-    const slots = await getSlotsWithWallet();
-    res.json({ success: true, slots });
-  } catch (err) {
-    res.status(500).json({ success: false });
-  }
-});
-
-/** قائمة المستخدمين الحاليين في الغرفة */
-router.get("/group-chat/users", auth, async (req, res) => {
-  try {
-    touchUser(req.user.id);
-    cleanupStale();
-    const list = Array.from(roomUsers.values()).map((u) => ({
-      userId: u.userId,
-      name: u.name,
-      gender: u.gender,
-      profileImage: u.profileImage || null,
-    }));
-    res.json({ success: true, users: list });
-  } catch (err) {
-    console.error("group-chat users error:", err);
-    res.status(500).json({ success: false });
-  }
-});
-
-/** جلب رسائل الدردشة الجماعية — مع cache لتخفيف الضغط */
+// GET /api/group-chat/messages
 router.get("/group-chat/messages", auth, async (req, res) => {
   try {
-    const now = Date.now();
-    if (messagesCache.data && now - messagesCache.ts < MESSAGES_CACHE_MS) {
-      return res.json(messagesCache.data);
-    }
-    const limit = Math.min(parseInt(req.query.limit, 10) || 250, 250);
-    const msgs = await GroupChatMessage.find({ roomId: "main" })
-      .select("fromId fromName fromProfileImage toId text createdAt audioUrl audioDurationSeconds imageUrl")
-      .sort({ createdAt: -1 })
+    const limit = Math.min(parseInt(req.query.limit, 10) || 250, 500);
+    const msgs = await GroupChatMessage.find({})
+      .sort({ createdAt: 1 })
       .limit(limit)
       .lean();
-    const payload = {
-      success: true,
-      messages: msgs.reverse().map((m) => ({
-        id: String(m._id),
+
+    const fromIds = [...new Set(msgs.map((m) => m.fromId))];
+    const users = await User.find({ userId: { $in: fromIds } })
+      .select("userId name profileImage age gender")
+      .lean();
+    const userMap = new Map(users.map((u) => [u.userId, u]));
+
+    const result = msgs.map((m) => {
+      const u = userMap.get(m.fromId);
+      return {
+        id: m._id,
         fromId: m.fromId,
-        fromName: m.fromName,
-        fromProfileImage: m.fromProfileImage,
-        toId: m.toId,
+        fromName: m.fromName || u?.name || "مستخدم",
+        fromProfileImage: m.fromProfileImage ?? u?.profileImage ?? null,
+        fromAge: m.fromAge ?? u?.age ?? null,
+        fromGender: m.fromGender ?? u?.gender ?? null,
+        fromDiamonds: m.fromDiamonds ?? null,
+        fromChargedGold: m.fromChargedGold ?? null,
+        toId: m.toId ?? null,
         text: m.text,
         createdAt: m.createdAt,
-        audioUrl: m.audioUrl,
-        audioDurationSeconds: m.audioDurationSeconds,
-        imageUrl: m.imageUrl,
-      })),
-    };
-    messagesCache.data = payload;
-    messagesCache.ts = now;
-    res.json(payload);
+        replyToText: m.replyToText ?? null,
+        replyToFromId: m.replyToFromId ?? null,
+        replyToFromName: m.replyToFromName ?? null,
+        audioUrl: m.audioUrl ?? null,
+        audioDurationSeconds: m.audioDurationSeconds ?? null,
+        imageUrl: m.imageUrl ?? null,
+      };
+    });
+
+    res.json({ success: true, messages: result });
   } catch (err) {
-    // عند فشل MongoDB: إرجاع آخر cache إن وُجد (لتجنب شاشة فارغة)
-    if (messagesCache.data) {
-      return res.json(messagesCache.data);
+    console.error("group-chat messages error:", err);
+    res.status(500).json({ success: false, message: "خطأ في جلب الرسائل" });
+  }
+});
+
+// POST /api/group-chat/send
+router.post("/group-chat/send", auth, async (req, res) => {
+  try {
+    const {
+      text,
+      audioUrl,
+      audioDurationSeconds,
+      imageUrl,
+      toId,
+      giftAmount,
+      replyToText,
+      replyToFromId,
+    } = req.body;
+
+    const fromId = req.user.id;
+    const isVoice = !!audioUrl;
+    const isImage = !!imageUrl;
+    const textVal = isVoice ? "🎤 رسالة صوتية" : isImage ? "📷 صورة" : (text || "").trim();
+    if (!isVoice && !isImage && !textVal) {
+      return res.status(400).json({ success: false, message: "النص أو المحتوى مطلوب" });
     }
-    console.error("group-chat messages error:", err?.message || err);
-    res.status(500).json({ success: false });
+
+    const fromUser = await User.findOne({ userId: fromId }).select("userId name profileImage age gender").lean();
+    if (!fromUser) return res.status(404).json({ success: false, message: "المستخدم غير موجود" });
+
+    let fromDiamonds = null;
+    let fromChargedGold = null;
+    if (giftAmount && Number(giftAmount) > 0) {
+      const wallet = await Wallet.findOne({ userId: fromId });
+      if (wallet) {
+        fromDiamonds = wallet.diamonds ?? 0;
+        fromChargedGold = wallet.chargedGold ?? 0;
+      }
+    }
+
+    const msg = await GroupChatMessage.create({
+      fromId,
+      fromName: fromUser.name || "مستخدم",
+      fromProfileImage: fromUser.profileImage || null,
+      fromAge: fromUser.age ?? null,
+      fromGender: fromUser.gender || null,
+      fromDiamonds,
+      fromChargedGold,
+      toId: toId || null,
+      text: String(textVal).slice(0, 500),
+      replyToText: replyToText ? String(replyToText).slice(0, 300) : null,
+      replyToFromId: replyToFromId ? String(replyToFromId) : null,
+      replyToFromName: null,
+      audioUrl: audioUrl || null,
+      audioDurationSeconds: audioDurationSeconds != null ? Number(audioDurationSeconds) : null,
+      imageUrl: imageUrl || null,
+    });
+
+    const MAX_MESSAGES = 500;
+    const count = await GroupChatMessage.countDocuments();
+    if (count > MAX_MESSAGES) {
+      const oldest = await GroupChatMessage.find().sort({ createdAt: 1 }).limit(count - MAX_MESSAGES).select("_id").lean();
+      await GroupChatMessage.deleteMany({ _id: { $in: oldest.map((o) => o._id) } });
+    }
+
+    res.json({
+      success: true,
+      message: {
+        id: msg._id,
+        fromId: msg.fromId,
+        fromName: msg.fromName,
+        fromProfileImage: msg.fromProfileImage,
+        fromAge: msg.fromAge,
+        fromGender: msg.fromGender,
+        fromDiamonds: msg.fromDiamonds,
+        fromChargedGold: msg.fromChargedGold,
+        toId: msg.toId,
+        text: msg.text,
+        createdAt: msg.createdAt,
+        replyToText: msg.replyToText,
+        replyToFromId: msg.replyToFromId,
+        replyToFromName: msg.replyToFromName,
+        audioUrl: msg.audioUrl,
+        audioDurationSeconds: msg.audioDurationSeconds,
+        imageUrl: msg.imageUrl,
+      },
+    });
+  } catch (err) {
+    console.error("group-chat send error:", err);
+    res.status(500).json({ success: false, message: "خطأ في إرسال الرسالة" });
   }
 });
 
