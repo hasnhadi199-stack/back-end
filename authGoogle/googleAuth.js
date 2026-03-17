@@ -75,8 +75,7 @@ router.post("/auth/check-email", async (req, res) => {
     if (!email) return res.status(400).json({ success: false, message: "البريد الإلكتروني مطلوب" });
 
     const trimmedEmail = String(email).trim().toLowerCase();
-    const emailRegex = new RegExp(`^${trimmedEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
-    const user = await User.findOne({ email: emailRegex });
+    const user = await User.findOne({ email: trimmedEmail });
     res.json({ success: true, exists: !!user });
   } catch (error) {
     console.error("check-email error:", error);
@@ -93,8 +92,7 @@ router.post("/auth/request-pin", async (req, res) => {
     const trimmedEmail = String(email).trim().toLowerCase();
     if (!trimmedEmail) return res.status(400).json({ success: false, message: "البريد الإلكتروني مطلوب" });
 
-    const emailRegex = new RegExp(`^${trimmedEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
-    let user = await User.findOne({ email: emailRegex });
+    let user = await User.findOne({ email: trimmedEmail });
 
     if (mode === "login") {
       if (!user) return res.status(404).json({ success: false, message: "البريد غير مسجل. قم بالتسجيل أولاً" });
@@ -136,8 +134,7 @@ router.post("/auth/verify-pin", async (req, res) => {
     if (!email || !pin) return res.status(400).json({ success: false, message: "الإيميل والكود مطلوبان" });
 
     const trimmedEmail = String(email).trim().toLowerCase();
-    const emailRegex = new RegExp(`^${trimmedEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
-    const user = await User.findOne({ email: emailRegex });
+    const user = await User.findOne({ email: trimmedEmail });
     if (!user || !user.loginPin || !user.loginPinExpiresAt)
       return res.status(400).json({ success: false, message: "لا يوجد كود فعال" });
 
