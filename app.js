@@ -51,7 +51,15 @@ app.get("/health", (req, res) => {
 
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/mydb";
 
-mongoose.connect(MONGODB_URI)
+const mongooseOptions = {
+  serverSelectionTimeoutMS: 60000,
+  connectTimeoutMS: 60000,
+  socketTimeoutMS: 45000,
+  maxPoolSize: 10,
+  retryWrites: true,
+};
+
+mongoose.connect(MONGODB_URI, mongooseOptions)
   .then(() => console.log("MongoDB Connected ✅"))
   .catch((err) => console.log("MongoDB Error ❌", err));
 
