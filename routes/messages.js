@@ -11,6 +11,11 @@ const { sendPushNotification, buildImageUrl, getBaseUrl, getPublicBaseUrl } = re
 
 const router = express.Router();
 
+// تخزين مؤقت سريع — استجابة فورية للطلبات المتكررة
+const inboxCache = new Map();
+const threadCache = new Map();
+const CACHE_TTL = 1500;
+
 // مصادقة عبر query token (للتشغيل الصوتي - expo-av لا يدعم headers)
 function authQuery(req, res, next) {
   const token = req.query.token || (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
@@ -215,6 +220,11 @@ router.post("/send", auth, async (req, res) => {
       console.warn("[messages] المستلم لا يملك pushToken:", toUserId);
     }
 
+    inboxCache.delete(`inbox:${fromId}`);
+    inboxCache.delete(`inbox:${toUserId}`);
+    threadCache.delete(`thread:${fromId}:${toUserId}`);
+    threadCache.delete(`thread:${toUserId}:${fromId}`);
+
     res.json({
       success: true,
       message: {
@@ -237,11 +247,15 @@ router.post("/send", auth, async (req, res) => {
   }
 });
 
-// GET /api/messages/inbox — آخر رسالة لكل محادثة تخص المستخدم الحالي
+// GET /api/messages/inbox — آخر رسالة لكل محادثة
 router.get("/inbox", auth, async (req, res) => {
+  const meId = req.user.id;
+  const key = `inbox:${meId}`;
+  const cached = inboxCache.get(key);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) {
+    return res.json(cached.data);
+  }
   try {
-    const meId = req.user.id;
-
     const msgs = await Message.find({
       $or: [{ fromId: meId }, { toId: meId }],
     })
@@ -279,7 +293,9 @@ router.get("/inbox", auth, async (req, res) => {
       });
     }
 
-    res.json({ success: true, messages: result });
+    const payload = { success: true, messages: result };
+    inboxCache.set(key, { data: payload, ts: Date.now() });
+    res.json(payload);
   } catch (err) {
     console.error("inbox error:", err);
     res.status(500).json({ success: false, message: "خطأ في جلب الرسائل" });
@@ -291,6 +307,11 @@ router.get("/thread/:otherId", auth, async (req, res) => {
   try {
     const meId = req.user.id;
     const otherId = req.params.otherId;
+    const key = `thread:${meId}:${otherId}`;
+    const cached = threadCache.get(key);
+    if (cached && Date.now() - cached.ts < CACHE_TTL) {
+      return res.json(cached.data);
+    }
 
     const msgs = await Message.find({
       $or: [
@@ -301,7 +322,7 @@ router.get("/thread/:otherId", auth, async (req, res) => {
       .sort({ createdAt: 1 })
       .lean();
 
-    res.json({
+    const payload = {
       success: true,
       messages: msgs.map((m) => ({
         id: m._id,
@@ -315,7 +336,9 @@ router.get("/thread/:otherId", auth, async (req, res) => {
         audioDurationSeconds: m.audioDurationSeconds ?? null,
         imageUrl: m.imageUrl || null,
       })),
-    });
+    };
+    threadCache.set(key, { data: payload, ts: Date.now() });
+    res.json(payload);
   } catch (err) {
     console.error("thread error:", err);
     res.status(500).json({ success: false, message: "خطأ في جلب المحادثة" });

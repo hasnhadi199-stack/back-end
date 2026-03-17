@@ -12,7 +12,7 @@ dns.setServers(["8.8.8.8", "8.8.4.4", "1.1.1.1"]);
 // Trust proxy (for localtunnel/ngrok)
 app.set("trust proxy", true);
 
-// Middleware
+// Middleware — ضغط الاستجابات لتسريع التحميل
 try {
   app.use(require("compression")());
 } catch {

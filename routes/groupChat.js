@@ -176,11 +176,16 @@ router.post("/group-chat/upload-music", auth, musicUpload.single("music"), async
   }
 });
 
-// تخزين مؤقت — عند فشل MongoDB نُرجع آخر بيانات (لتجنب أخطاء مهلة الاتصال)
+// تخزين مؤقت — استجابة فورية عند الطلبات المتكررة (كل 1.5 ثانية)
 let messagesCache = { data: [], ts: 0 };
+const CACHE_TTL_MS = 2000;
 
-// GET /api/group-chat/messages — جلب رسائل الدردشة الجماعية (كل المستخدمين يرون نفس الرسائل)
+// GET /api/group-chat/messages — جلب رسائل الدردشة الجماعية
 router.get("/group-chat/messages", auth, async (req, res) => {
+  const now = Date.now();
+  if (messagesCache.data.length > 0 && now - messagesCache.ts < CACHE_TTL_MS) {
+    return res.json({ success: true, messages: messagesCache.data });
+  }
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 250, 500);
     const msgs = await GroupChatMessage.find({})
