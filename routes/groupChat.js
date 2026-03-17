@@ -4,7 +4,6 @@ const fs = require("fs");
 const multer = require("multer");
 const jwt = require("jsonwebtoken");
 const { AccessToken } = require("livekit-server-sdk");
-const GroupChatMessage = require("../module/GroupChatMessage");
 const User = require("../module/Users");
 const Wallet = require("../module/Wallet");
 const { auth } = require("../authGoogle/googleAuth");
@@ -176,65 +175,16 @@ router.post("/group-chat/upload-music", auth, musicUpload.single("music"), async
   }
 });
 
+// رسائل الدردشة الجماعية: لا تُحفظ في MongoDB — إرجاع فارغ دائماً (لتجنب مهلة الاتصال)
 // GET /api/group-chat/messages
 router.get("/group-chat/messages", auth, async (req, res) => {
-  try {
-    const limit = Math.min(parseInt(req.query.limit, 10) || 250, 500);
-    const msgs = await GroupChatMessage.find({})
-      .sort({ createdAt: 1 })
-      .limit(limit)
-      .lean();
-
-    const fromIds = [...new Set(msgs.map((m) => m.fromId))];
-    const users = await User.find({ userId: { $in: fromIds } })
-      .select("userId name profileImage age gender")
-      .lean();
-    const userMap = new Map(users.map((u) => [u.userId, u]));
-
-    const result = msgs.map((m) => {
-      const u = userMap.get(m.fromId);
-      return {
-        id: m._id,
-        fromId: m.fromId,
-        fromName: m.fromName || u?.name || "مستخدم",
-        fromProfileImage: m.fromProfileImage ?? u?.profileImage ?? null,
-        fromAge: m.fromAge ?? u?.age ?? null,
-        fromGender: m.fromGender ?? u?.gender ?? null,
-        fromDiamonds: m.fromDiamonds ?? null,
-        fromChargedGold: m.fromChargedGold ?? null,
-        toId: m.toId ?? null,
-        text: m.text,
-        createdAt: m.createdAt,
-        replyToText: m.replyToText ?? null,
-        replyToFromId: m.replyToFromId ?? null,
-        replyToFromName: m.replyToFromName ?? null,
-        audioUrl: m.audioUrl ?? null,
-        audioDurationSeconds: m.audioDurationSeconds ?? null,
-        imageUrl: m.imageUrl ?? null,
-      };
-    });
-
-    res.json({ success: true, messages: result });
-  } catch (err) {
-    console.error("group-chat messages error:", err);
-    res.status(500).json({ success: false, message: "خطأ في جلب الرسائل" });
-  }
+  res.json({ success: true, messages: [] });
 });
 
-// POST /api/group-chat/send
+// POST /api/group-chat/send — لا تُحفظ في MongoDB — إرجاع نجاح للواجهة فقط (لتجنب مهلة الاتصال)
 router.post("/group-chat/send", auth, async (req, res) => {
   try {
-    const {
-      text,
-      audioUrl,
-      audioDurationSeconds,
-      imageUrl,
-      toId,
-      giftAmount,
-      replyToText,
-      replyToFromId,
-    } = req.body;
-
+    const { text, audioUrl, imageUrl, toId } = req.body;
     const fromId = req.user.id;
     const isVoice = !!audioUrl;
     const isImage = !!imageUrl;
@@ -246,65 +196,30 @@ router.post("/group-chat/send", auth, async (req, res) => {
     const fromUser = await User.findOne({ userId: fromId }).select("userId name profileImage age gender").lean();
     if (!fromUser) return res.status(404).json({ success: false, message: "المستخدم غير موجود" });
 
-    let fromDiamonds = null;
-    let fromChargedGold = null;
-    if (giftAmount && Number(giftAmount) > 0) {
-      const wallet = await Wallet.findOne({ userId: fromId });
-      if (wallet) {
-        fromDiamonds = wallet.diamonds ?? 0;
-        fromChargedGold = wallet.chargedGold ?? 0;
-      }
-    }
-
-    const msg = await GroupChatMessage.create({
-      fromId,
-      fromName: fromUser.name || "مستخدم",
-      fromProfileImage: fromUser.profileImage || null,
-      fromAge: fromUser.age ?? null,
-      fromGender: fromUser.gender || null,
-      fromDiamonds,
-      fromChargedGold,
-      toId: toId || null,
-      text: String(textVal).slice(0, 500),
-      replyToText: replyToText ? String(replyToText).slice(0, 300) : null,
-      replyToFromId: replyToFromId ? String(replyToFromId) : null,
-      replyToFromName: null,
-      audioUrl: audioUrl || null,
-      audioDurationSeconds: audioDurationSeconds != null ? Number(audioDurationSeconds) : null,
-      imageUrl: imageUrl || null,
-    });
-
-    const MAX_MESSAGES = 500;
-    const count = await GroupChatMessage.countDocuments();
-    if (count > MAX_MESSAGES) {
-      const oldest = await GroupChatMessage.find().sort({ createdAt: 1 }).limit(count - MAX_MESSAGES).select("_id").lean();
-      await GroupChatMessage.deleteMany({ _id: { $in: oldest.map((o) => o._id) } });
-    }
-
+    const now = new Date();
     res.json({
       success: true,
       message: {
-        id: msg._id,
-        fromId: msg.fromId,
-        fromName: msg.fromName,
-        fromProfileImage: msg.fromProfileImage,
-        fromAge: msg.fromAge,
-        fromGender: msg.fromGender,
-        fromDiamonds: msg.fromDiamonds,
-        fromChargedGold: msg.fromChargedGold,
-        toId: msg.toId,
-        text: msg.text,
-        createdAt: msg.createdAt,
-        replyToText: msg.replyToText,
-        replyToFromId: msg.replyToFromId,
-        replyToFromName: msg.replyToFromName,
-        audioUrl: msg.audioUrl,
-        audioDurationSeconds: msg.audioDurationSeconds,
-        imageUrl: msg.imageUrl,
+        id: `temp_${Date.now()}`,
+        fromId,
+        fromName: fromUser.name || "مستخدم",
+        fromProfileImage: fromUser.profileImage || null,
+        fromAge: fromUser.age ?? null,
+        fromGender: fromUser.gender || null,
+        fromDiamonds: null,
+        fromChargedGold: null,
+        toId: toId || null,
+        text: String(textVal).slice(0, 500),
+        createdAt: now,
+        replyToText: null,
+        replyToFromId: null,
+        replyToFromName: null,
+        audioUrl: audioUrl || null,
+        audioDurationSeconds: req.body.audioDurationSeconds ?? null,
+        imageUrl: imageUrl || null,
       },
     });
   } catch (err) {
-    console.error("group-chat send error:", err);
     res.status(500).json({ success: false, message: "خطأ في إرسال الرسالة" });
   }
 });
