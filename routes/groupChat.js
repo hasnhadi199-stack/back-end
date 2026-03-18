@@ -328,4 +328,21 @@ router.post("/group-chat/send", auth, async (req, res) => {
   }
 });
 
+// DELETE /api/group-chat/messages/:id — حذف رسالة (للمرسل فقط)
+router.delete("/group-chat/messages/:id", auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const meId = req.user.id;
+    const msg = await GroupChatMessage.findById(id);
+    if (!msg) return res.status(404).json({ success: false, message: "الرسالة غير موجودة" });
+    if (msg.fromId !== meId) return res.status(403).json({ success: false, message: "لا يمكنك حذف رسالة غيرك" });
+    await GroupChatMessage.findByIdAndDelete(id);
+    messagesCache = { data: [], ts: 0 };
+    res.json({ success: true });
+  } catch (err) {
+    console.error("delete group-chat message error:", err);
+    res.status(500).json({ success: false, message: "خطأ في الحذف" });
+  }
+});
+
 module.exports = router;
