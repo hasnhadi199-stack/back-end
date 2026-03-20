@@ -5,6 +5,7 @@ const multer = require("multer");
 const jwt = require("jsonwebtoken");
 const { AccessToken } = require("livekit-server-sdk");
 const GroupChatMessage = require("../module/GroupChatMessage");
+const GroupChatVisitor = require("../module/GroupChatVisitor");
 const User = require("../module/Users");
 const Wallet = require("../module/Wallet");
 const { auth } = require("../authGoogle/googleAuth");
@@ -44,10 +45,41 @@ const musicUpload = multer({
   },
 });
 
+const MAX_VISITORS = 100;
+
 // POST /api/group-chat/join
 router.post("/group-chat/join", auth, async (req, res) => {
   try {
-    roomMembers.add(req.user.id);
+    const userId = req.user.id;
+    roomMembers.add(userId);
+
+    // تخزين في قائمة "all" — كل من دخل يبقى حتى لو خرج
+    const user = await User.findOne({ userId }).select("userId name profileImage gender").lean();
+    await GroupChatVisitor.findOneAndUpdate(
+      { userId },
+      {
+        userId,
+        name: user?.name ?? "مستخدم",
+        profileImage: user?.profileImage ?? null,
+        gender: user?.gender ?? null,
+        lastJoinedAt: new Date(),
+      },
+      { upsert: true, new: true }
+    );
+
+    // حذف الأقدم إذا تجاوزنا الحد
+    const count = await GroupChatVisitor.countDocuments();
+    if (count > MAX_VISITORS) {
+      const toDelete = await GroupChatVisitor.find()
+        .sort({ lastJoinedAt: 1 })
+        .limit(count - MAX_VISITORS)
+        .select("_id")
+        .lean();
+      if (toDelete.length) {
+        await GroupChatVisitor.deleteMany({ _id: { $in: toDelete.map((v) => v._id) } });
+      }
+    }
+
     res.json({ success: true });
   } catch (err) {
     console.error("group-chat join error:", err);
@@ -55,7 +87,7 @@ router.post("/group-chat/join", auth, async (req, res) => {
   }
 });
 
-// POST /api/group-chat/leave
+// POST /api/group-chat/leave — لا نحذف من قائمة "all"، يبقى المستخدم في القائمة
 router.post("/group-chat/leave", auth, async (req, res) => {
   try {
     roomMembers.delete(req.user.id);
@@ -128,18 +160,18 @@ router.get("/group-chat/slots", auth, async (req, res) => {
   }
 });
 
-// GET /api/group-chat/users
+// GET /api/group-chat/users — قائمة "all": كل من دخل الدردشة (حتى لو خرج)
 router.get("/group-chat/users", auth, async (req, res) => {
   try {
-    const userIds = Array.from(roomMembers);
-    const users = await User.find({ userId: { $in: userIds } })
-      .select("userId name profileImage gender")
+    const visitors = await GroupChatVisitor.find()
+      .sort({ lastJoinedAt: -1 })
+      .limit(MAX_VISITORS)
       .lean();
-    const list = users.map((u) => ({
-      userId: u.userId,
-      name: u.name || "مستخدم",
-      profileImage: u.profileImage || null,
-      gender: u.gender || null,
+    const list = visitors.map((v) => ({
+      userId: v.userId,
+      name: v.name || "مستخدم",
+      profileImage: v.profileImage || null,
+      gender: v.gender || null,
     }));
     res.json({ success: true, users: list });
   } catch (err) {
