@@ -10,6 +10,11 @@ const GroupChatMessageSchema = new mongoose.Schema(
     fromDiamonds: { type: Number, default: null },
     fromChargedGold: { type: Number, default: null },
     toId: { type: String, default: null },
+    giftRecipients: [{
+      userId: { type: String },
+      name: { type: String },
+      profileImage: { type: String, default: null },
+    }],
     text: { type: String, default: "" },
     replyToText: { type: String, default: null },
     replyToFromId: { type: String, default: null },

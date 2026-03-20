@@ -303,6 +303,7 @@ router.get("/group-chat/messages", auth, async (req, res) => {
         fromDiamonds: diamonds,
         fromChargedGold: chargedGold,
         toId: m.toId ?? null,
+        giftRecipients: Array.isArray(m.giftRecipients) ? m.giftRecipients : [],
         text: m.text,
         createdAt: m.createdAt,
         replyToText: m.replyToText ?? null,
@@ -333,6 +334,7 @@ router.post("/group-chat/send", auth, async (req, res) => {
       audioDurationSeconds,
       imageUrl,
       toId,
+      toIds,
       giftAmount,
       replyToText,
       replyToFromId,
@@ -348,11 +350,15 @@ router.post("/group-chat/send", auth, async (req, res) => {
       return res.status(400).json({ success: false, message: "النص أو المحتوى مطلوب" });
     }
 
+    const recipientIds = Array.isArray(toIds) && toIds.length > 0 ? toIds : (toId ? [toId] : []);
+    const recipientCount = Math.max(1, recipientIds.length);
+
     if (isGift && Number(giftAmount) > 0) {
       const giftMatch = String(textVal).match(/^GIFT:([^:]+):(\d+)$/);
       if (giftMatch) {
         const amount = parseInt(giftMatch[2], 10);
         if (Number.isFinite(amount) && amount > 0) {
+          const totalCost = amount * recipientCount;
           let senderWallet = await Wallet.findOne({ userId: fromId });
           if (!senderWallet) {
             senderWallet = await Wallet.create({
@@ -365,17 +371,17 @@ router.post("/group-chat/send", auth, async (req, res) => {
             });
           }
           const totalAvail = (senderWallet.chargedGold ?? 0) + (senderWallet.freeGold ?? 0);
-          if (totalAvail < amount) {
+          if (totalAvail < totalCost) {
             return res.status(400).json({ success: false, message: "رصيدك من الذهب غير كافٍ لإرسال الهدية" });
           }
           const charged = senderWallet.chargedGold ?? 0;
           const free = senderWallet.freeGold ?? 0;
-          const takeFromCharged = Math.min(charged, amount);
-          const takeFromFree = amount - takeFromCharged;
+          const takeFromCharged = Math.min(charged, totalCost);
+          const takeFromFree = totalCost - takeFromCharged;
           senderWallet.chargedGold = charged - takeFromCharged;
           senderWallet.freeGold = free - takeFromFree;
           senderWallet.totalGold = senderWallet.chargedGold + senderWallet.freeGold;
-          const senderDiamonds = Math.round(amount * 0.001 * 100) / 100;
+          const senderDiamonds = Math.round(totalCost * 0.001 * 100) / 100;
           senderWallet.diamonds = Math.round(((senderWallet.diamonds ?? 0) + senderDiamonds) * 100) / 100;
           await senderWallet.save();
         }
@@ -395,6 +401,16 @@ router.post("/group-chat/send", auth, async (req, res) => {
       }
     }
 
+    let giftRecipients = [];
+    if (recipientIds.length > 0) {
+      const users = await User.find({ userId: { $in: recipientIds } }).select("userId name profileImage").lean();
+      const userMap = new Map(users.map((u) => [u.userId, u]));
+      giftRecipients = recipientIds.map((uid) => {
+        const u = userMap.get(uid);
+        return { userId: uid, name: u?.name || "مستخدم", profileImage: u?.profileImage ?? null };
+      });
+    }
+
     const msg = await GroupChatMessage.create({
       fromId,
       fromName: fromUser.name || "مستخدم",
@@ -403,7 +419,8 @@ router.post("/group-chat/send", auth, async (req, res) => {
       fromGender: fromUser.gender || null,
       fromDiamonds,
       fromChargedGold,
-      toId: toId || null,
+      toId: recipientIds[0] || null,
+      giftRecipients,
       text: String(textVal).slice(0, 500),
       replyToText: replyToText ? String(replyToText).slice(0, 300) : null,
       replyToFromId: replyToFromId ? String(replyToFromId) : null,
@@ -435,6 +452,7 @@ router.post("/group-chat/send", auth, async (req, res) => {
         fromDiamonds: msg.fromDiamonds,
         fromChargedGold: msg.fromChargedGold,
         toId: msg.toId,
+        giftRecipients: msg.giftRecipients || [],
         text: msg.text,
         createdAt: msg.createdAt,
         replyToText: msg.replyToText,
