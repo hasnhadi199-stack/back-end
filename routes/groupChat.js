@@ -359,15 +359,51 @@ router.post("/group-chat/send", auth, async (req, res) => {
       return res.status(400).json({ success: false, message: "النص أو المحتوى مطلوب" });
     }
 
-    const recipientIds = Array.isArray(toIds) && toIds.length > 0 ? toIds : (toId ? [toId] : []);
+    let recipientIds = Array.isArray(toIds) && toIds.length > 0 ? toIds : (toId ? [toId] : []);
+    const isGiftToAll = isGift && recipientIds.length === 0;
+
+    if (isGiftToAll) {
+      const visitors = await GroupChatVisitor.find().sort({ lastJoinedAt: -1 }).limit(MAX_VISITORS).select("userId").lean();
+      recipientIds = visitors.map((v) => v.userId).filter((uid) => uid !== fromId);
+    }
+
     const recipientCount = Math.max(1, recipientIds.length);
+    let totalCost = Number(giftAmount) > 0 ? Number(giftAmount) * recipientCount : 0;
 
     if (isGift && Number(giftAmount) > 0) {
       const giftMatch = String(textVal).match(/^GIFT:([^:]+):(\d+)$/);
       if (giftMatch) {
         const amount = parseInt(giftMatch[2], 10);
+        const giftType = giftMatch[1];
         if (Number.isFinite(amount) && amount > 0) {
-          const totalCost = amount * recipientCount;
+          let distribList = [];
+          if (isGiftToAll && recipientIds.length > 0) {
+            const shuffled = [...recipientIds].sort(() => Math.random() - 0.5);
+            const n = shuffled.length;
+            if (n === 1) {
+              distribList = [{ userId: shuffled[0], amt: amount }];
+            } else if (n === 2) {
+              const half = Math.floor(amount / 2);
+              const rest = amount - half;
+              distribList = [
+                { userId: shuffled[0], amt: half },
+                { userId: shuffled[1], amt: rest },
+              ];
+            } else if (n <= amount) {
+              const per = Math.floor(amount / n);
+              const rem = amount % n;
+              distribList = shuffled.map((uid, i) => ({
+                userId: uid,
+                amt: per + (i < rem ? 1 : 0),
+              }));
+            } else {
+              const picks = shuffled.slice(0, amount);
+              distribList = picks.map((uid) => ({ userId: uid, amt: 1 }));
+            }
+            totalCost = amount;
+          } else {
+            totalCost = amount * recipientCount;
+          }
           let senderWallet = await Wallet.findOne({ userId: fromId });
           if (!senderWallet) {
             senderWallet = await Wallet.create({
@@ -393,6 +429,72 @@ router.post("/group-chat/send", auth, async (req, res) => {
           const senderDiamonds = Math.round(totalCost * 0.001 * 100) / 100;
           senderWallet.diamonds = Math.round(((senderWallet.diamonds ?? 0) + senderDiamonds) * 100) / 100;
           await senderWallet.save();
+
+          if (isGiftToAll && distribList.length > 0) {
+            const fromUser = await User.findOne({ userId: fromId }).select("userId name profileImage age gender").lean();
+            if (!fromUser) return res.status(404).json({ success: false, message: "المستخدم غير موجود" });
+            let fromDiamonds = null;
+            let fromChargedGold = null;
+            const wallet = await Wallet.findOne({ userId: fromId });
+            if (wallet) {
+              fromDiamonds = wallet.diamonds ?? 0;
+              fromChargedGold = wallet.chargedGold ?? 0;
+            }
+            const users = await User.find({ userId: { $in: distribList.map((d) => d.userId) } }).select("userId name profileImage").lean();
+            const userMap = new Map(users.map((u) => [u.userId, u]));
+            const msgs = [];
+            for (const { userId: uid, amt } of distribList) {
+              if (amt <= 0) continue;
+              const u = userMap.get(uid);
+              const giftText = `GIFT:${giftType}:${amt}`;
+              const m = await GroupChatMessage.create({
+                fromId,
+                fromName: fromUser.name || "مستخدم",
+                fromProfileImage: fromUser.profileImage || null,
+                fromAge: fromUser.age ?? null,
+                fromGender: fromUser.gender ?? null,
+                fromDiamonds,
+                fromChargedGold,
+                toId: uid,
+                giftRecipients: [{ userId: uid, name: u?.name || "مستخدم", profileImage: u?.profileImage ?? null }],
+                text: giftText,
+                replyToText: replyToText ? String(replyToText).slice(0, 300) : null,
+                replyToFromId: replyToFromId ? String(replyToFromId).slice(0, 300) : null,
+                replyToFromName: replyToFromName ? String(replyToFromName).slice(0, 100) : null,
+                audioUrl: null,
+                audioDurationSeconds: null,
+                imageUrl: null,
+              });
+              msgs.push({
+                id: m._id,
+                fromId: m.fromId,
+                fromName: m.fromName,
+                fromProfileImage: m.fromProfileImage,
+                fromAge: m.fromAge,
+                fromGender: m.fromGender,
+                fromDiamonds: m.fromDiamonds,
+                fromChargedGold: m.fromChargedGold,
+                toId: m.toId,
+                giftRecipients: m.giftRecipients || [],
+                text: m.text,
+                createdAt: m.createdAt,
+                replyToText: m.replyToText,
+                replyToFromId: m.replyToFromId,
+                replyToFromName: m.replyToFromName,
+                audioUrl: m.audioUrl,
+                audioDurationSeconds: m.audioDurationSeconds,
+                imageUrl: m.imageUrl,
+              });
+            }
+            const cnt = await GroupChatMessage.countDocuments();
+            if (cnt > MAX_MESSAGES) {
+              const excess = cnt - MAX_MESSAGES;
+              const oldest = await GroupChatMessage.find().sort({ createdAt: 1 }).limit(excess).select("_id").lean();
+              if (oldest.length) await GroupChatMessage.deleteMany({ _id: { $in: oldest.map((o) => o._id) } });
+            }
+            messagesCache = { data: [], ts: 0 };
+            return res.json({ success: true, messages: msgs });
+          }
         }
       }
     }
