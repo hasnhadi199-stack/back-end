@@ -46,6 +46,11 @@ const musicUpload = multer({
 });
 
 const MAX_VISITORS = 100;
+const MAX_MESSAGES = 250;
+/** رسالة دخول للدردشة — يُعرض في التطبيق كـ: قادم [الاسم] */
+const JOIN_MESSAGE_TEXT = "__join__";
+/** لا تكرّر إعلان الدخول لنفس المستخدم إلا بعد (ملي ثانية) لتقليل السبام */
+const JOIN_ANNOUNCE_MIN_GAP_MS = 60 * 1000;
 
 // POST /api/group-chat/join — استجابة فورية (تنظيف الزوار في الخلفية)
 router.post("/group-chat/join", auth, async (req, res) => {
@@ -53,7 +58,8 @@ router.post("/group-chat/join", auth, async (req, res) => {
     const userId = req.user.id;
     roomMembers.add(userId);
 
-    const user = await User.findOne({ userId }).select("userId name profileImage gender").lean();
+    const prevVisitor = await GroupChatVisitor.findOne({ userId }).select("lastJoinedAt").lean();
+    const user = await User.findOne({ userId }).select("userId name profileImage gender age").lean();
     await GroupChatVisitor.findOneAndUpdate(
       { userId },
       {
@@ -65,6 +71,32 @@ router.post("/group-chat/join", auth, async (req, res) => {
       },
       { upsert: true, new: true }
     );
+
+    const now = Date.now();
+    const lastT = prevVisitor?.lastJoinedAt ? new Date(prevVisitor.lastJoinedAt).getTime() : 0;
+    const shouldAnnounceJoin = !prevVisitor || now - lastT > JOIN_ANNOUNCE_MIN_GAP_MS;
+
+    if (shouldAnnounceJoin) {
+      try {
+        await GroupChatMessage.create({
+          fromId: userId,
+          fromName: user?.name ?? "مستخدم",
+          fromProfileImage: user?.profileImage ?? null,
+          fromAge: user?.age ?? null,
+          fromGender: user?.gender ?? null,
+          text: JOIN_MESSAGE_TEXT,
+        });
+        const cnt = await GroupChatMessage.countDocuments();
+        if (cnt > MAX_MESSAGES) {
+          const excess = cnt - MAX_MESSAGES;
+          const oldest = await GroupChatMessage.find().sort({ createdAt: 1 }).limit(excess).select("_id").lean();
+          if (oldest.length) await GroupChatMessage.deleteMany({ _id: { $in: oldest.map((o) => o._id) } });
+        }
+        messagesCache = { data: [], ts: 0 };
+      } catch (e) {
+        console.error("group-chat join announcement:", e?.message);
+      }
+    }
 
     usersCache = { data: null, ts: 0 };
     res.json({ success: true });
@@ -160,7 +192,7 @@ router.get("/group-chat/slots", auth, async (req, res) => {
 });
 
 let usersCache = { data: null, ts: 0 };
-const USERS_CACHE_TTL = 3000;
+const USERS_CACHE_TTL = 1200;
 
 // GET /api/group-chat/users — قائمة "all" مع cache
 router.get("/group-chat/users", auth, async (req, res) => {
@@ -273,7 +305,8 @@ router.post("/group-chat/upload-music", auth, musicUpload.single("music"), async
 
 // تخزين مؤقت — استجابة فورية عند الطلبات المتكررة
 let messagesCache = { data: [], ts: 0 };
-const CACHE_TTL_MS = 4000;
+/** قصير ليظهر محتوى الدردشة (ومنها الصوت المسجل) بسرعة لجميع العملاء */
+const CACHE_TTL_MS = 800;
 
 // GET /api/group-chat/messages — جلب رسائل الدردشة الجماعية
 router.get("/group-chat/messages", auth, async (req, res) => {
