@@ -49,8 +49,8 @@ const MAX_VISITORS = 100;
 const MAX_MESSAGES = 250;
 /** رسالة دخول للدردشة — يُعرض في التطبيق كـ: قادم [الاسم] */
 const JOIN_MESSAGE_TEXT = "__join__";
-/** لا تكرّر إعلان الدخول لنفس المستخدم إلا بعد (ملي ثانية) لتقليل السبام */
-const JOIN_ANNOUNCE_MIN_GAP_MS = 60 * 1000;
+/** أظهر إعلان الدخول كل مرة (حسب طلب التطبيق) */
+const JOIN_ANNOUNCE_MIN_GAP_MS = 0;
 
 // POST /api/group-chat/join — استجابة فورية (تنظيف الزوار في الخلفية)
 router.post("/group-chat/join", auth, async (req, res) => {
