@@ -1,6 +1,8 @@
+const http = require("http");
 const express = require("express");
 const dns = require("dns");
 const app = express();
+const { initGroupChatWebSocket } = require("./wsGroupChat");
 const mongoose = require("mongoose");
 const cors = require("cors");
 require("dotenv").config();
@@ -89,7 +91,9 @@ mongoose.connection.on("disconnected", () => {
 
 // Scalingo/Heroku: اربط المنفذ أولاً (خلال 60 ثانية) ثم اتصل بـ MongoDB
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, "0.0.0.0", () => {
+const server = http.createServer(app);
+initGroupChatWebSocket(server);
+server.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
   connectMongo();
 });

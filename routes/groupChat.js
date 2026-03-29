@@ -10,6 +10,7 @@ const User = require("../module/Users");
 const Wallet = require("../module/Wallet");
 const { auth } = require("../authGoogle/googleAuth");
 const { getBaseUrl } = require("../utils/push");
+const { broadcastGroupChat } = require("../wsGroupChat");
 
 const router = express.Router();
 
@@ -78,13 +79,43 @@ router.post("/group-chat/join", auth, async (req, res) => {
 
     if (shouldAnnounceJoin) {
       try {
-        await GroupChatMessage.create({
+        const joinMsg = await GroupChatMessage.create({
           fromId: userId,
           fromName: user?.name ?? "مستخدم",
           fromProfileImage: user?.profileImage ?? null,
           fromAge: user?.age ?? null,
           fromGender: user?.gender ?? null,
           text: JOIN_MESSAGE_TEXT,
+        });
+        let fromDiamonds = 0;
+        let fromChargedGold = 0;
+        const wJoin = await Wallet.findOne({ userId }).select("diamonds chargedGold").lean();
+        if (wJoin) {
+          fromDiamonds = wJoin.diamonds ?? 0;
+          fromChargedGold = wJoin.chargedGold ?? 0;
+        }
+        broadcastGroupChat({
+          type: "new_message",
+          message: {
+            id: joinMsg._id,
+            fromId: userId,
+            fromName: user?.name ?? "مستخدم",
+            fromProfileImage: user?.profileImage ?? null,
+            fromAge: user?.age ?? null,
+            fromGender: user?.gender ?? null,
+            fromDiamonds,
+            fromChargedGold,
+            toId: null,
+            giftRecipients: [],
+            text: JOIN_MESSAGE_TEXT,
+            createdAt: joinMsg.createdAt,
+            replyToText: null,
+            replyToFromId: null,
+            replyToFromName: null,
+            audioUrl: null,
+            audioDurationSeconds: null,
+            imageUrl: null,
+          },
         });
         const cnt = await GroupChatMessage.countDocuments();
         if (cnt > MAX_MESSAGES) {
@@ -528,6 +559,7 @@ router.post("/group-chat/send", auth, async (req, res) => {
               if (oldest.length) await GroupChatMessage.deleteMany({ _id: { $in: oldest.map((o) => o._id) } });
             }
             messagesCache = { data: [], ts: 0 };
+            broadcastGroupChat({ type: "new_messages", messages: msgs });
             return res.json({ success: true, messages: msgs });
           }
         }
@@ -586,28 +618,31 @@ router.post("/group-chat/send", auth, async (req, res) => {
 
     messagesCache = { data: [], ts: 0 };
 
+    const outMsg = {
+      id: msg._id,
+      fromId: msg.fromId,
+      fromName: msg.fromName,
+      fromProfileImage: msg.fromProfileImage,
+      fromAge: msg.fromAge,
+      fromGender: msg.fromGender,
+      fromDiamonds: msg.fromDiamonds,
+      fromChargedGold: msg.fromChargedGold,
+      toId: msg.toId,
+      giftRecipients: msg.giftRecipients || [],
+      text: msg.text,
+      createdAt: msg.createdAt,
+      replyToText: msg.replyToText,
+      replyToFromId: msg.replyToFromId,
+      replyToFromName: msg.replyToFromName,
+      audioUrl: msg.audioUrl,
+      audioDurationSeconds: msg.audioDurationSeconds,
+      imageUrl: msg.imageUrl,
+    };
+    broadcastGroupChat({ type: "new_message", message: outMsg });
+
     res.json({
       success: true,
-      message: {
-        id: msg._id,
-        fromId: msg.fromId,
-        fromName: msg.fromName,
-        fromProfileImage: msg.fromProfileImage,
-        fromAge: msg.fromAge,
-        fromGender: msg.fromGender,
-        fromDiamonds: msg.fromDiamonds,
-        fromChargedGold: msg.fromChargedGold,
-        toId: msg.toId,
-        giftRecipients: msg.giftRecipients || [],
-        text: msg.text,
-        createdAt: msg.createdAt,
-        replyToText: msg.replyToText,
-        replyToFromId: msg.replyToFromId,
-        replyToFromName: msg.replyToFromName,
-        audioUrl: msg.audioUrl,
-        audioDurationSeconds: msg.audioDurationSeconds,
-        imageUrl: msg.imageUrl,
-      },
+      message: outMsg,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: "خطأ في إرسال الرسالة" });
@@ -624,6 +659,7 @@ router.delete("/group-chat/messages/:id", auth, async (req, res) => {
     if (msg.fromId !== meId) return res.status(403).json({ success: false, message: "لا يمكنك حذف رسالة غيرك" });
     await GroupChatMessage.findByIdAndDelete(id);
     messagesCache = { data: [], ts: 0 };
+    broadcastGroupChat({ type: "message_deleted", id: String(id) });
     res.json({ success: true });
   } catch (err) {
     console.error("delete group-chat message error:", err);
