@@ -192,7 +192,7 @@ router.get("/group-chat/slots", auth, async (req, res) => {
 });
 
 let usersCache = { data: null, ts: 0 };
-const USERS_CACHE_TTL = 1200;
+const USERS_CACHE_TTL = 2200;
 
 // GET /api/group-chat/users — قائمة "all" مع cache
 router.get("/group-chat/users", auth, async (req, res) => {
@@ -305,8 +305,8 @@ router.post("/group-chat/upload-music", auth, musicUpload.single("music"), async
 
 // تخزين مؤقت — استجابة فورية عند الطلبات المتكررة
 let messagesCache = { data: [], ts: 0 };
-/** قصير ليظهر محتوى الدردشة (ومنها الصوت المسجل) بسرعة لجميع العملاء */
-const CACHE_TTL_MS = 800;
+/** تخزين مؤقت للاستجابة — يقلل ضربات Mongo عند استطلاع عدة عملاء (لا علاقة لحجم DB بالبطء) */
+const CACHE_TTL_MS = 1400;
 
 // GET /api/group-chat/messages — جلب رسائل الدردشة الجماعية
 router.get("/group-chat/messages", auth, async (req, res) => {
@@ -316,11 +316,13 @@ router.get("/group-chat/messages", auth, async (req, res) => {
   }
   try {
     const limit = 250;
+    /** آخر N رسالة: ترتيب تنازلي ثم عكس — أسرع وأصح عندما يتجاوز العدد الحد الأقصى مؤقتًا */
     const msgs = await GroupChatMessage.find({})
-      .sort({ createdAt: 1 })
+      .sort({ createdAt: -1 })
       .limit(limit)
       .select("fromId fromName fromProfileImage fromAge fromGender fromDiamonds fromChargedGold toId giftRecipients text createdAt replyToText replyToFromId replyToFromName audioUrl audioDurationSeconds imageUrl")
       .lean();
+    msgs.reverse();
 
     const fromIds = [...new Set(msgs.map((m) => m.fromId))];
     const [users, wallets] = await Promise.all([
